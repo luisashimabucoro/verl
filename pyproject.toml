@@ -111,3 +111,7 @@ verl = [
   "trainer/config/*.yaml",
   "trainer/config/*/*.yaml",
 ]
+
+[tool.uv.extra-build-dependencies]
+      xformers = ["torch"]
+      flash-attn = ["torch"]

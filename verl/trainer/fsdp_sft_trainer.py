@@ -231,7 +231,8 @@ class FSDPSFTTrainer:
                 local_model_path,
                 config=config,
                 torch_dtype=torch_dtype,
-                attn_implementation="flash_attention_2",
+                attn_implementation="sdpa",
+                # attn_implementation="flash_attention_2",
                 trust_remote_code=trust_remote_code,
             )
 
