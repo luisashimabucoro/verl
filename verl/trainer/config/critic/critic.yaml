@@ -95,6 +95,16 @@ checkpoint:
   # Whether to save checkpoints asynchronously. Only effective for Megatron as of now.
   async_save: False
 
+  # Mode for async checkpointing. Options: "shm" (uses /dev/shm) or null (sync).
+  # Only implemented for FSDP as of now.
+  async_save_mode: null
+
+  # Whether to clean up old checkpoints asynchronously
+  async_cleanup: False
+
+  # Enables debug print statements within save/cleanup threads
+  thread_debug: True
+
 # profile the critic model in `update_critic`
 profiler:
 

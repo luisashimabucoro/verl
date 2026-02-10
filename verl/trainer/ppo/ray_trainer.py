@@ -42,7 +42,7 @@ from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, Ra
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.config import AlgoConfig
 from verl.trainer.ppo import core_algos
-from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
+from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss, cosine_decay_with_warmup, constant_decay
 from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
     compute_throughout_metrics,
@@ -60,6 +60,7 @@ from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
+from verl.utils.training_samples_tracker import TrainingSamplesTracker
 
 
 @dataclass
@@ -338,6 +339,45 @@ class RayPPOTrainer:
         # kl loss control currently not suppoorted
         if self.config.algorithm.use_kl_in_reward:
             self.kl_ctrl_in_reward = core_algos.get_kl_controller(self.config.algorithm.kl_ctrl)
+
+        # scheduled loss coefficient disabling
+        actor_cfg = self.config.actor_rollout_ref.actor
+        self._disable_entropy_after_step = OmegaConf.select(actor_cfg, "disable_entropy_after_step")
+        self._change_clip_high_after_step = OmegaConf.select(actor_cfg, "change_clip_high_after_step")
+        self._disable_kl_after_step = OmegaConf.select(actor_cfg, "disable_kl_after_step")
+        self._entropy_disabled = False
+        self._kl_disabled = False
+        self._clip_high_changed = False
+        
+        # entropy coefficient schedule configuration
+        # entropy_coeff_schedule can be: "cosine", "constant", or None/False (no schedule)
+        self._entropy_coeff_schedule = OmegaConf.select(actor_cfg, "entropy_coeff_schedule", default=None)
+        self._base_entropy_coeff = OmegaConf.select(actor_cfg, "entropy_coeff", default=0.0)
+        
+        # cosine schedule parameters
+        self._entropy_anneal_warmup_learning_rate = OmegaConf.select(actor_cfg, "entropy_anneal_warmup_learning_rate", default=0.0)
+        self._entropy_anneal_warmup_steps = OmegaConf.select(actor_cfg, "entropy_anneal_warmup_steps", default=0)
+        self._entropy_anneal_hold_base_rate_steps = OmegaConf.select(actor_cfg, "entropy_anneal_hold_base_rate_steps", default=10)
+        self._entropy_anneal_early_stop = OmegaConf.select(actor_cfg, "entropy_anneal_early_stop", default=0)
+        self._entropy_anneal_end_learning_rate = OmegaConf.select(actor_cfg, "entropy_anneal_end_learning_rate", default=0.0)
+        
+        # constant decay schedule parameters
+        self._constant_decay_lower_boundary = OmegaConf.select(actor_cfg, "constant_decay_lower_boundary", default=None)
+        self._constant_decay_upper_boundary = OmegaConf.select(actor_cfg, "constant_decay_upper_boundary", default=None)
+        self._constant_decay_constant_value = OmegaConf.select(actor_cfg, "constant_decay_constant_value", default=0.0)
+        self._constant_decay_default_value = OmegaConf.select(actor_cfg, "constant_decay_default_value", default=0.0)
+        
+        # Backward compatibility: support old anneal_entropy_coeff flag
+        if OmegaConf.select(actor_cfg, "anneal_entropy_coeff", default=False) and self._entropy_coeff_schedule is None:
+            self._entropy_coeff_schedule = "cosine"
+        
+        # Validate schedule parameter
+        valid_schedules = ["cosine", "constant", None, False]
+        if self._entropy_coeff_schedule not in valid_schedules:
+            raise ValueError(
+                f"Invalid entropy_coeff_schedule: {self._entropy_coeff_schedule}. "
+                f"Must be one of: 'cosine', 'constant', None, or False"
+            )
 
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
@@ -765,6 +805,8 @@ class RayPPOTrainer:
 
     def _save_checkpoint(self):
         from verl.utils.fs import local_mkdir_safe
+        from verl.utils.checkpoint.checkpoint_manager import determine_checkpoints_to_keep
+        import glob
 
         # path: given_path + `/global_step_{global_steps}` + `/actor`
         local_global_step_folder = os.path.join(
@@ -793,8 +835,26 @@ class RayPPOTrainer:
             self.config.trainer.get("max_critic_ckpt_to_keep", None) if not remove_previous_ckpt_in_save else 1
         )
 
+        # Pass save_freq and preemp_save_freq for incremental cleanup in checkpoint managers
+        save_freq = self.config.trainer.get("save_freq", -1)
+        preemp_save_freq = self.config.trainer.get("preemp_save_freq", -1)
+        
+        # Validation: warn if preemp_save_freq >= save_freq (redundant but harmless)
+        if save_freq > 0 and preemp_save_freq > 0 and preemp_save_freq >= save_freq:
+            if self.global_steps == 0 or (self.global_steps % 100 == 0):  # Only warn occasionally
+                print(f"Warning: preemp_save_freq ({preemp_save_freq}) >= save_freq ({save_freq}). "
+                      f"This means all checkpoints will be kept (no preemptive cleanup).")
+        
+        save_freq_for_cleanup = save_freq if save_freq > 0 and preemp_save_freq > 0 else -1
+        is_preemp_checkpoint = (
+            save_freq > 0 
+            and preemp_save_freq > 0 
+            and self.global_steps % save_freq != 0
+        )
+
         self.actor_rollout_wg.save_checkpoint(
-            actor_local_path, actor_remote_path, self.global_steps, max_ckpt_to_keep=max_actor_ckpt_to_keep
+            actor_local_path, actor_remote_path, self.global_steps, max_ckpt_to_keep=max_actor_ckpt_to_keep, 
+            save_freq=save_freq_for_cleanup, is_preemp_checkpoint=is_preemp_checkpoint
         )
 
         if self.use_critic:
@@ -807,8 +867,12 @@ class RayPPOTrainer:
                 )
             )
             self.critic_wg.save_checkpoint(
-                critic_local_path, critic_remote_path, self.global_steps, max_ckpt_to_keep=max_critic_ckpt_to_keep
+                critic_local_path, critic_remote_path, self.global_steps, max_ckpt_to_keep=max_critic_ckpt_to_keep, 
+                save_freq=save_freq_for_cleanup, is_preemp_checkpoint=is_preemp_checkpoint
             )
+        
+        # Note: Incremental cleanup is handled by checkpoint managers after async saves complete
+        # The checkpoint managers will delete old preemptive checkpoints automatically
 
         # save dataloader
         local_mkdir_safe(local_global_step_folder)
@@ -919,6 +983,88 @@ class RayPPOTrainer:
         )
         metrics.update(global_balance_stats)
 
+    def _maybe_disable_loss_coefficients(self) -> dict:
+        """Disable entropy/KL regularization once configured steps have passed."""
+        metrics: dict[str, float] = {}
+        if not hasattr(self, "actor_rollout_wg"):
+            return metrics
+
+        updates: dict[str, float] = {}
+
+        if (
+            self._disable_entropy_after_step is not None
+            and not self._entropy_disabled
+            and self.global_steps > self._disable_entropy_after_step
+        ):
+            updates["entropy_coeff"] = 0.0
+            self._entropy_disabled = True
+            metrics["actor/entropy_coeff"] = 0.0
+            with open_dict(self.config.actor_rollout_ref.actor):
+                self.config.actor_rollout_ref.actor.entropy_coeff = 0.0
+
+        if (
+            self._change_clip_high_after_step is not None
+            and not self._clip_high_changed
+            and self.global_steps > self._change_clip_high_after_step
+        ):
+            self._clip_high_changed = True
+            with open_dict(self.config.actor_rollout_ref.actor):
+                self.config.actor_rollout_ref.actor.clip_ratio_high = self.config.actor_rollout_ref.actor.clip_ratio
+            metrics["actor/clip_ratio_high"] = self.config.actor_rollout_ref.actor.clip_ratio_high
+
+        if (
+            self._disable_kl_after_step is not None
+            and not self._kl_disabled
+            and self.global_steps > self._disable_kl_after_step
+        ):
+            updates["kl_loss_coef"] = 0.0
+            self._kl_disabled = True
+            metrics["actor/kl_coef"] = 0.0
+            with open_dict(self.config.actor_rollout_ref.actor):
+                self.config.actor_rollout_ref.actor.kl_loss_coef = 0.0
+
+        if updates:
+            self.actor_rollout_wg.update_loss_coefficients(**updates)
+
+        return metrics
+    
+    def _anneal_entropy_coeff(self, global_step, total_steps, base_entropy_coeff, warmup_learning_rate=0.0, warmup_steps=0, hold_base_rate_steps=10, early_stop=0, end_learning_rate=0.0):
+        """Anneal the entropy coefficient based on the global steps."""
+        updated_entropy_coeff = cosine_decay_with_warmup(
+            global_step, 
+            total_steps, 
+            base_entropy_coeff, 
+            warmup_learning_rate=warmup_learning_rate, 
+            warmup_steps=warmup_steps, 
+            hold_base_rate_steps=hold_base_rate_steps,
+            early_stop=early_stop,
+            end_learning_rate=end_learning_rate
+        )
+        metrics: dict[str, float] = {}
+        updates: dict[str, float] = {}
+        updates["entropy_coeff"] = updated_entropy_coeff
+        metrics["actor/entropy_coeff"] = updated_entropy_coeff
+        if updates:
+            self.actor_rollout_wg.update_loss_coefficients(**updates)
+        return metrics
+
+    def _constant_decay_entropy_coeff(self, average_entropy, lower_boundary, upper_boundary, constant_value, default_value=0.0):
+        """Apply constant decay to entropy coefficient based on average entropy boundaries."""
+        updated_entropy_coeff = constant_decay(
+            average_entropy=average_entropy,
+            lower_boundary=lower_boundary,
+            upper_boundary=upper_boundary,
+            constant_value=constant_value,
+            default_value=default_value
+        )
+        metrics: dict[str, float] = {}
+        updates: dict[str, float] = {}
+        updates["entropy_coeff"] = updated_entropy_coeff
+        metrics["actor/entropy_coeff"] = updated_entropy_coeff
+        if updates:
+            self.actor_rollout_wg.update_loss_coefficients(**updates)
+        return metrics
+
     def compute_rollout_importance_weights_and_add_to_batch(self, batch: DataProto) -> tuple[DataProto, dict]:
         """Compute rollout importance sampling weights and mismatch metrics, conditionally add weights to batch.
 
@@ -980,6 +1126,20 @@ class RayPPOTrainer:
             config=OmegaConf.to_container(self.config, resolve=True),
         )
 
+        # Initialize training samples tracker (optional, controlled by log_training_behavior)
+        log_training_behavior = self.config.trainer.get("log_training_behavior", False)
+        if log_training_behavior:
+            # Use the same directory as checkpoints (default_local_dir)
+            log_dir = self.config.trainer.get("default_local_dir", None)
+            self.samples_tracker = TrainingSamplesTracker(
+                tokenizer=self.tokenizer,
+                log_dir=log_dir,
+                enabled=True
+            )
+        else:
+            # Create a dummy tracker that does nothing when disabled
+            self.samples_tracker = TrainingSamplesTracker(enabled=False)
+
         self.global_steps = 0
 
         # load checkpoint before doing anything
@@ -1015,10 +1175,31 @@ class RayPPOTrainer:
         )
         next_step_profile = False
 
+        prev_epoch = -1
         for epoch in range(self.config.trainer.total_epochs):
+            prev_epoch = epoch
             for batch_dict in self.train_dataloader:
                 metrics = {}
                 timing_raw = {}
+
+                # apply entropy coefficient schedule if enabled (before checking disable)
+                if self._entropy_coeff_schedule == "cosine" and not self._entropy_disabled:
+                    entropy_anneal_metrics = self._anneal_entropy_coeff(
+                        global_step=self.global_steps,
+                        total_steps=self.total_training_steps,
+                        base_entropy_coeff=self._base_entropy_coeff,
+                        warmup_learning_rate=self._entropy_anneal_warmup_learning_rate,
+                        warmup_steps=self._entropy_anneal_warmup_steps,
+                        hold_base_rate_steps=self._entropy_anneal_hold_base_rate_steps,
+                        early_stop=self._entropy_anneal_early_stop,
+                        end_learning_rate=self._entropy_anneal_end_learning_rate
+                    )
+                    if entropy_anneal_metrics:
+                        metrics.update(entropy_anneal_metrics)
+                
+                loss_schedule_metrics = self._maybe_disable_loss_coefficients()
+                if loss_schedule_metrics:
+                    metrics.update(loss_schedule_metrics)
 
                 with marked_timer("start_profile", timing_raw):
                     self._start_profiling(
@@ -1116,8 +1297,26 @@ class RayPPOTrainer:
                         response_masks = batch.batch["response_mask"]
                         loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
                         entropy_agg = agg_loss(loss_mat=entropys, loss_mask=response_masks, loss_agg_mode=loss_agg_mode)
-                        old_log_prob_metrics = {"actor/entropy": entropy_agg.detach().item()}
+                        average_entropy = entropy_agg.detach().item()
+                        old_log_prob_metrics = {"actor/entropy": average_entropy}
                         metrics.update(old_log_prob_metrics)
+                        
+                        # apply constant decay schedule to entropy coefficient if enabled
+                        if self._entropy_coeff_schedule == "constant" and not self._entropy_disabled:
+                            if self._constant_decay_lower_boundary is None or self._constant_decay_upper_boundary is None:
+                                raise ValueError("constant_decay_lower_boundary and constant_decay_upper_boundary must be set when entropy_coeff_schedule is 'constant'")
+                            constant_decay_metrics = self._constant_decay_entropy_coeff(
+                                average_entropy=average_entropy,
+                                lower_boundary=self._constant_decay_lower_boundary,
+                                upper_boundary=self._constant_decay_upper_boundary,
+                                constant_value=self._constant_decay_constant_value,
+                                default_value=self._constant_decay_default_value
+                            )
+                            if constant_decay_metrics:
+                                metrics.update(constant_decay_metrics)
+                        
+                        # Add entropys to batch temporarily for tracking (will be removed after tracking)
+                        batch.batch["entropys"] = entropys
                         old_log_prob.batch.pop("entropys")
                         batch = batch.union(old_log_prob)
 
@@ -1151,6 +1350,18 @@ class RayPPOTrainer:
 
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
+                        
+                        # Track training samples (index, accuracy, entropy) for this batch
+                        # Now we have both rewards (token_level_scores) and entropy in batch
+                        loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
+                        self.samples_tracker.log_samples(
+                            batch=batch,
+                            epoch=self.global_steps,
+                            global_step=self.global_steps,
+                            loss_agg_mode=loss_agg_mode,
+                        )
+                        # Remove entropys from batch after tracking (it was already removed from old_log_prob)
+                        batch.batch.pop("entropys", None)
 
                         # compute rewards. apply_kl_penalty if available
                         if self.config.algorithm.use_kl_in_reward:
@@ -1223,18 +1434,29 @@ class RayPPOTrainer:
                 )
                 # Check if the conditions for saving a checkpoint are met.
                 # The conditions include a mandatory condition (1) and
-                # one of the following optional conditions (2/3/4):
-                # 1. The save frequency is set to a positive value.
+                # one of the following optional conditions (2/3/4/5):
+                # 1. The save frequency is set to a positive value OR preemp_save_freq is set.
                 # 2. It's the last training step.
                 # 3. The current step number is a multiple of the save frequency.
                 # 4. The ESI(Elastic Server Instance)/training plan is close to expiration.
-                if self.config.trainer.save_freq > 0 and (
-                    is_last_step or self.global_steps % self.config.trainer.save_freq == 0 or esi_close_to_expiration
-                ):
+                # 5. The current step number is a multiple of preemp_save_freq (for preemptive checkpointing).
+                preemp_save_freq = self.config.trainer.get("preemp_save_freq", -1)
+                should_save_preemp = (
+                    preemp_save_freq > 0 and self.global_steps % preemp_save_freq == 0
+                )
+                should_save_regular = (
+                    self.config.trainer.save_freq > 0
+                    and (is_last_step or self.global_steps % self.config.trainer.save_freq == 0)
+                )
+                if (should_save_regular or should_save_preemp or esi_close_to_expiration):
                     if esi_close_to_expiration:
                         print("Force saving checkpoint: ESI instance expiration approaching.")
+                    elif should_save_preemp and not should_save_regular:
+                        print(f"Saving preemptive checkpoint at step {self.global_steps}")
                     with marked_timer("save_checkpoint", timing_raw, color="green"):
                         self._save_checkpoint()
+                    # Flush training samples tracker at checkpoint save frequency
+                    self.samples_tracker.flush_all()
 
                 with marked_timer("stop_profile", timing_raw):
                     next_step_profile = (
@@ -1287,6 +1509,8 @@ class RayPPOTrainer:
                     )
 
                 if is_last_step:
+                    # Flush all remaining samples
+                    self.samples_tracker.flush_all()
                     pprint(f"Final validation metrics: {last_val_metrics}")
                     progress_bar.close()
                     return
@@ -1296,3 +1520,6 @@ class RayPPOTrainer:
                 if hasattr(self.train_dataset, "on_batch_end"):
                     # The dataset may be changed after each training batch
                     self.train_dataset.on_batch_end(batch=batch)
+        
+        # Flush all remaining samples after training completes
+        self.samples_tracker.flush_all()

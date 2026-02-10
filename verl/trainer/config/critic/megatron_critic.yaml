@@ -35,6 +35,8 @@ model:
     moe_config:
 
       freeze_moe_router: False
+  use_remove_padding: True
+  enable_gradient_checkpointing: True
 
 # Whether to load initial weights
 load_weight: True

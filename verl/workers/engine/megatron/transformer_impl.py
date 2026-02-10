@@ -351,8 +351,11 @@ class MegatronEngine(BaseEngine):
         """
         if self._is_offload_param:
             load_megatron_model_to_gpu(self.module, load_grad=True)
+        save_freq = kwargs.get("save_freq", -1)
+        is_preemp_checkpoint = kwargs.get("is_preemp_checkpoint", False)
         self.checkpoint_mananager.save_checkpoint(
-            local_path=local_path, hdfs_path=hdfs_path, global_step=global_step, max_ckpt_to_keep=max_ckpt_to_keep
+            local_path=local_path, hdfs_path=hdfs_path, global_step=global_step, max_ckpt_to_keep=max_ckpt_to_keep, 
+            save_freq=save_freq, is_preemp_checkpoint=is_preemp_checkpoint
         )
         torch.distributed.barrier()
         if self._is_offload_param:

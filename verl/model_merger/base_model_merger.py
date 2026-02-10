@@ -135,8 +135,10 @@ def generate_config_from_args(args: argparse.Namespace) -> ModelMergerConfig:
         "hf_model_config_path": os.path.join(args.local_dir, "huggingface"),
         "use_cpu_initialization": args.use_cpu_initialization,
     }
+    print(f"Common config args: {common_config_args}")
 
     if args.operation == "merge":
+        print(f"Merging model from {args.local_dir} to {args.target_dir}")
         config = ModelMergerConfig(
             **common_config_args,
             target_dir=args.target_dir,

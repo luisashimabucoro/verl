@@ -575,8 +575,12 @@ class FSDPEngine(BaseEngine):
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.module)
 
+        save_freq = kwargs.get("save_freq", -1)
+        is_preemp_checkpoint = kwargs.get("is_preemp_checkpoint", False)
+        patience = kwargs.get("patience", 4)
         self.checkpoint_manager.save_checkpoint(
-            local_path=local_path, hdfs_path=hdfs_path, global_step=global_step, max_ckpt_to_keep=max_ckpt_to_keep
+            local_path=local_path, hdfs_path=hdfs_path, global_step=global_step, max_ckpt_to_keep=max_ckpt_to_keep, 
+            save_freq=save_freq, is_preemp_checkpoint=is_preemp_checkpoint, patience=patience
         )
 
         torch.distributed.barrier()

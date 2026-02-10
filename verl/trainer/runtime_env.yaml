@@ -1,5 +1,36 @@
 working_dir: ./
-excludes: ["/.git/"]
+# Add this to runtime_env.yaml
+excludes:
+  # General
+  - ".git/"
+  - "__pycache__/"
+  - ".mypy_cache/"
+  - ".pytest_cache/"
+  - ".vscode/"
+  - ".idea/"
+
+  # Python Venvs
+  - ".venv/"
+  - "venv/"
+  - "uv_envs/"
+  - "*.egg-info/"
+
+  # Wheels & Packages
+  - "*.whl"
+  - "*.wheel"
+  - "*.tar.gz"
+
+  # Data & Logs
+  - "data/"
+  - "logs/"
+  - "*.parquet"
+  - "*.csv"
+  - "*.jsonl"
+  - "*.log"
+  - "wandb/"
+
+  # Notebooks
+  - ".ipynb_checkpoints/"
 env_vars:
   TORCH_NCCL_AVOID_RECORD_STREAMS: "1"
   CUDA_DEVICE_MAX_CONNECTIONS: "1"

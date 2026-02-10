@@ -359,17 +359,18 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                     logger=logger,
                 )
 
-    def save_checkpoint(self, local_path: str, hdfs_path: str = None, global_step: int = 0, max_ckpt_to_keep=None):
+    def save_checkpoint(self, local_path: str, hdfs_path: str = None, global_step: int = 0, max_ckpt_to_keep=None, save_freq: int = -1, is_preemp_checkpoint: bool = False):
         # record the previous global step
         self.previous_global_step = global_step
 
-        # remove previous local_path
-        if (
+        # Old max_ckpt_to_keep cleanup (only if save_freq is not set)
+        if save_freq <= 0 and (
             max_ckpt_to_keep
             and isinstance(max_ckpt_to_keep, int)
             and max_ckpt_to_keep > 0
             and len(self.previous_saved_paths) >= max_ckpt_to_keep
         ):
+            # Fall back to old max_ckpt_to_keep behavior
             keep_start = len(self.previous_saved_paths) - max_ckpt_to_keep + 1
             self.remove_previous_save_local_path(self.previous_saved_paths[:keep_start])
             self.previous_saved_paths = self.previous_saved_paths[keep_start:]
@@ -548,10 +549,36 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                     hdfs_io.copy(src=dist_checkpoint_path, dst=hdfs_path, dirs_exist_ok=True)
                     hdfs_io.copy(src=hf_config_tokenizer_path, dst=hdfs_path, dirs_exist_ok=True)
 
+        # Incremental cleanup function (only for preemptive checkpoints)
+        def incremental_cleanup_fn():
+            if is_preemp_checkpoint and save_freq > 0:
+                from verl.utils.checkpoint.checkpoint_manager import determine_preemp_checkpoints_to_delete
+                
+                # Exclude current checkpoint from the list
+                previous_paths = [p for p in self.previous_saved_paths if p != local_path]
+                paths_to_delete = determine_preemp_checkpoints_to_delete(
+                    previous_paths, global_step, save_freq
+                )
+                
+                if paths_to_delete:
+                    log_with_rank(
+                        f"Deleting {len(paths_to_delete)} old preemptive checkpoints after async save completes",
+                        rank=self.rank,
+                        logger=logger,
+                        log_only_rank_0=True,
+                    )
+                    self.remove_previous_save_local_path(paths_to_delete)
+                    # Remove deleted paths from tracking
+                    self.previous_saved_paths = [p for p in self.previous_saved_paths if p not in paths_to_delete]
+        
+        def combined_finalize_fn():
+            finalize_save_fn()
+            incremental_cleanup_fn()
+
         if self.checkpoint_config.async_save:
             assert async_save_request is not None, "Async save request should not be None when using async save."
-            async_save_request.add_finalize_fn(finalize_save_fn)
+            async_save_request.add_finalize_fn(combined_finalize_fn)
         else:
-            finalize_save_fn()
+            combined_finalize_fn()
 
         self.previous_saved_paths.append(local_path)

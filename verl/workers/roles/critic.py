@@ -204,8 +204,15 @@ class CriticWorker(Worker, DistProfilerExtension):
         return output
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
-        return self.engine.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
+    def save_checkpoint(
+        self,
+        local_path,
+        hdfs_path=None,
+        global_step=0,
+        max_ckpt_to_keep=None,
+        **kwargs,
+    ):
+        return self.engine.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep, **kwargs)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=False):

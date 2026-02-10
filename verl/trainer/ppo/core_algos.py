@@ -239,6 +239,10 @@ def compute_gae_advantage_return(
 
     """
     with torch.no_grad():
+        # ----------------
+        print(f"token_level_rewards: {token_level_rewards.shape}")
+        print(f"token_level_rewards: {token_level_rewards}")
+        # ----------------
         nextvalues = 0
         lastgaelam = 0
         advantages_reversed = []
@@ -1529,3 +1533,122 @@ def compute_pf_ppo_reweight_data(
     resampled_data.meta_info = resampled_meta_info
 
     return resampled_data
+
+
+def cosine_decay_with_warmup(global_step,
+                                total_steps,
+                                learning_rate_base,
+                                warmup_learning_rate=0.0,
+                                warmup_steps=0,
+                                hold_base_rate_steps=0,
+                                early_stop=0,
+                                end_learning_rate=0.0):
+    """Cosine decay schedule with warm up period.
+    Cosine annealing learning rate as described in
+        Loshchilov and Hutter, SGDR: Stochastic Gradient Descent with Warm Restarts.
+        ICLR 2017. https://arxiv.org/abs/1608.03983
+    In this schedule, the learning rate grows linearly from warmup_learning_rate
+    to learning_rate_base for warmup_steps, then transitions to a cosine decay
+    schedule.
+    Arguments:
+        global_step {int} -- global step.
+        learning_rate_base {float} -- base learning rate.
+        total_steps {int} -- total number of training steps.
+    Keyword Arguments:
+        warmup_learning_rate {float} -- initial learning rate for warm up. (default: {0.0})
+        warmup_steps {int} -- number of warmup steps. (default: {0})
+        hold_base_rate_steps {int} -- Optional number of steps to hold base learning rate
+                                    before decaying. (default: {0})
+        early_stop {int} -- Number of steps before total_steps where decay should reach
+                           end_learning_rate. The decay reaches end_learning_rate at
+                           total_steps - early_stop. (default: {0})
+        end_learning_rate {float} -- Minimum learning rate value to reach at the end of decay.
+                                    The decay reaches this value at total_steps - early_stop.
+                                    (default: {0.0})
+    Returns:
+        a float representing learning rate.
+    Raises:
+        ValueError: if warmup_learning_rate is larger than learning_rate_base,
+        or if warmup_steps is larger than total_steps, or if early_stop is negative,
+        or if early_stop >= total_steps - warmup_steps - hold_base_rate_steps.
+    """
+    if total_steps < warmup_steps:
+        raise ValueError('total_steps must be larger or equal to '
+                            'warmup_steps.')
+    if early_stop < 0:
+        raise ValueError('early_stop must be non-negative.')
+    
+    # Calculate the effective end step for cosine decay
+    effective_end_step = total_steps - early_stop
+    decay_period = effective_end_step - warmup_steps - hold_base_rate_steps
+    
+    if decay_period <= 0:
+        raise ValueError(
+            f'decay_period must be positive. Got decay_period = {decay_period} '
+            f'(total_steps={total_steps}, early_stop={early_stop}, '
+            f'warmup_steps={warmup_steps}, hold_base_rate_steps={hold_base_rate_steps})'
+        )
+    
+    # Handle warmup phase first
+    if warmup_steps > 0:
+        if learning_rate_base < warmup_learning_rate:
+            raise ValueError('learning_rate_base must be larger or equal to '
+                                'warmup_learning_rate.')
+        if global_step < warmup_steps:
+            slope = (learning_rate_base - warmup_learning_rate) / warmup_steps
+            warmup_rate = slope * global_step + warmup_learning_rate
+            return float(warmup_rate)
+    
+    # Handle hold base rate phase
+    if hold_base_rate_steps > 0 and global_step <= warmup_steps + hold_base_rate_steps:
+        return float(learning_rate_base)
+    
+    # Handle decay phase: cosine decay from learning_rate_base to end_learning_rate
+    # Formula: end_learning_rate + (learning_rate_base - end_learning_rate) * 0.5 * (1 + cos(pi * progress))
+    # where progress goes from 0 to 1 over the decay period
+    if global_step <= effective_end_step:
+        progress = (global_step - warmup_steps - hold_base_rate_steps) / float(decay_period)
+        learning_rate = float(end_learning_rate + (learning_rate_base - end_learning_rate) * 0.5 * (
+            1 + np.cos(np.pi * progress)
+        ))
+        return float(learning_rate)
+    else:
+        # After effective_end_step, keep the end_learning_rate
+        return float(end_learning_rate)
+
+
+def constant_decay(average_entropy,
+                    lower_boundary,
+                    upper_boundary,
+                    constant_value,
+                    default_value=0.0):
+    """Constant decay schedule for entropy coefficient based on entropy boundaries.
+    
+    This function monitors the average entropy and returns a constant entropy coefficient
+    when the entropy goes below a lower boundary or above an upper boundary. Otherwise,
+    it returns a default value.
+    
+    Arguments:
+        average_entropy {float} -- Current average entropy value.
+        lower_boundary {float} -- Lower threshold for entropy. If entropy goes below this,
+                                 the constant value is returned.
+        upper_boundary {float} -- Upper threshold for entropy. If entropy goes above this,
+                                 the constant value is returned.
+        constant_value {float} -- Constant entropy coefficient to return when boundaries
+                                 are exceeded.
+    Keyword Arguments:
+        default_value {float} -- Default entropy coefficient to return when entropy is
+                                within boundaries. (default: {0.0})
+    Returns:
+        a float representing the entropy coefficient.
+    Raises:
+        ValueError: if lower_boundary is larger than upper_boundary.
+    """
+    if lower_boundary > upper_boundary:
+        raise ValueError('lower_boundary must be less than or equal to '
+                        'upper_boundary.')
+    
+    if average_entropy < lower_boundary or average_entropy > upper_boundary:
+        return float(constant_value)
+    else:
+        return float(default_value)

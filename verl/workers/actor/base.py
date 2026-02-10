@@ -16,6 +16,7 @@ The base class for Actor
 """
 
 from abc import ABC, abstractmethod
+from typing import Optional
 
 import torch
 
@@ -64,3 +65,12 @@ class BasePPOActor(ABC):
 
         """
         pass
+
+    def update_loss_coefficients(
+        self, *, entropy_coeff: Optional[float] = None, kl_loss_coef: Optional[float] = None
+    ) -> None:
+        """Update entropy / KL coefficients used during training."""
+        if entropy_coeff is not None:
+            self.config.entropy_coeff = entropy_coeff
+        if kl_loss_coef is not None:
+            self.config.kl_loss_coef = kl_loss_coef

@@ -25,7 +25,7 @@ data:
   use_shm: False
   apply_chat_template_kwargs: {}
 model:
-  partial_pretrain: ~/models/gemma-1.1-7b-it
+  partial_pretrain: /nlp/scr/lushima/deepseek-math-7b-instruct
   use_shm: False
   fsdp_config:
     model_dtype: fp32

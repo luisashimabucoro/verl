@@ -140,6 +140,21 @@ class BaseCheckpointManager:
             if not os.path.exists(abs_path):
                 continue
             shutil.rmtree(abs_path, ignore_errors=True)
+            self.cleanup_empty_global_step_dir(abs_path)
+
+    @staticmethod
+    def cleanup_empty_global_step_dir(path: str):
+        """Remove the enclosing global_step_* directory if it became empty."""
+        parent_dir = os.path.dirname(os.path.abspath(path))
+        parent_name = os.path.basename(parent_dir)
+        if not parent_name.startswith("global_step_"):
+            return
+        try:
+            if os.path.isdir(parent_dir) and not os.listdir(parent_dir):
+                os.rmdir(parent_dir)
+        except OSError:
+            # Directory may have been removed concurrently or hold new files; ignore safely
+            pass
 
     @staticmethod
     def get_rng_state():
@@ -236,3 +251,171 @@ def should_save_ckpt_esi(max_steps_duration: float, save_ckpt_duration: float = 
         return time_difference < timedelta(minutes=threshold_minutes)
     else:
         return False
+
+
+def should_save_ckpt_time_based(
+    save_time_interval: float, last_checkpoint_time: float, current_time: float = None
+) -> bool:
+    """
+    Determine if checkpoint should be saved based on elapsed time since last checkpoint.
+
+    Args:
+        save_time_interval: Time interval (seconds) between checkpoints. If <= 0, time-based saving is disabled.
+        last_checkpoint_time: Timestamp of the last checkpoint (seconds since epoch).
+        current_time: Current timestamp (seconds since epoch). If None, uses time.time().
+
+    Returns:
+        bool: True if enough time has elapsed since last checkpoint, False otherwise.
+    """
+    if save_time_interval <= 0:
+        return False
+
+    import time
+
+    if current_time is None:
+        current_time = time.time()
+
+    elapsed_time = current_time - last_checkpoint_time
+    return elapsed_time >= save_time_interval
+
+
+def extract_step_from_path(checkpoint_path: str) -> int:
+    """
+    Extract the global step number from a checkpoint path.
+    
+    Args:
+        checkpoint_path: Path to checkpoint, e.g., "/path/to/global_step_100/actor"
+    
+    Returns:
+        int: The step number, or -1 if not found
+    """
+    import re
+    # Look for "global_step_{number}" in the path
+    match = re.search(r'global_step_(\d+)', checkpoint_path)
+    if match:
+        return int(match.group(1))
+    return -1
+
+
+def determine_preemp_checkpoints_to_delete(
+    previous_saved_paths: list, current_step: int, save_freq: int
+) -> list:
+    """
+    Determine which preemptive checkpoints to delete incrementally.
+    
+    This function implements incremental cleanup where:
+    - Checkpoints at multiples of save_freq are NEVER deleted
+    - When a new preemptive checkpoint is saved, delete old preemptive checkpoints
+      that are before the most recent save_freq multiple
+    - Keep the most recent preemptive checkpoint (the one just saved)
+    
+    Args:
+        previous_saved_paths: List of checkpoint paths that have been saved (excluding current)
+        current_step: Current step number being saved
+        save_freq: Frequency for long-term checkpoint retention (e.g., 20)
+    
+    Returns:
+        list: Paths to delete (only preemptive checkpoints, never save_freq multiples)
+    """
+    if save_freq <= 0:
+        # If save_freq is not set, don't delete anything
+        return []
+    
+    # Extract step numbers from paths
+    path_steps = []
+    for path in previous_saved_paths:
+        step = extract_step_from_path(path)
+        if step >= 0:
+            path_steps.append((step, path))
+    
+    if not path_steps:
+        return []
+    
+    # Sort by step number
+    path_steps.sort(key=lambda x: x[0])
+    
+    # Find the most recent save_freq multiple that's <= current_step
+    current_save_freq_multiple = (current_step // save_freq) * save_freq
+    
+    # Find the most recent checkpoint (we'll keep this one)
+    most_recent_step, _ = path_steps[-1]
+    
+    paths_to_delete = []
+    
+    for step, path in path_steps:
+        # NEVER delete checkpoints that are multiples of save_freq
+        if step % save_freq == 0:
+            continue
+        # Keep the most recent checkpoint (even if not a multiple of save_freq)
+        if step == most_recent_step:
+            continue
+        # Delete preemptive checkpoints that are before the current save_freq multiple
+        if step < current_save_freq_multiple:
+            paths_to_delete.append(path)
+    
+    return paths_to_delete
+
+
+def determine_checkpoints_to_keep(
+    previous_saved_paths: list, current_step: int, save_freq: int
+) -> tuple[list, list]:
+    """
+    Determine which checkpoints to keep and which to delete based on smart cleanup strategy.
+    
+    This function implements a strategy where:
+    - Checkpoints at multiples of save_freq are kept long-term
+    - The most recent checkpoint is always kept (even if not a multiple of save_freq)
+    - Intermediate checkpoints between save_freq multiples are deleted when a new
+      save_freq multiple is reached
+    
+    Args:
+        previous_saved_paths: List of checkpoint paths that have been saved
+        current_step: Current step number being saved
+        save_freq: Frequency for long-term checkpoint retention (e.g., 20)
+    
+    Returns:
+        tuple: (paths_to_keep, paths_to_delete)
+    """
+    if save_freq <= 0:
+        # If save_freq is not set, keep all checkpoints (fallback to old behavior)
+        return previous_saved_paths, []
+    
+    # Extract step numbers from paths
+    path_steps = []
+    for path in previous_saved_paths:
+        step = extract_step_from_path(path)
+        if step >= 0:
+            path_steps.append((step, path))
+    
+    # Sort by step number
+    path_steps.sort(key=lambda x: x[0])
+    
+    # Determine which checkpoints to keep
+    paths_to_keep = []
+    paths_to_delete = []
+    
+    if not path_steps:
+        return paths_to_keep, paths_to_delete
+    
+    # Find the most recent save_freq multiple that's <= current_step
+    current_save_freq_multiple = (current_step // save_freq) * save_freq
+    
+    # Find the most recent checkpoint (for keeping even if not a multiple of save_freq)
+    most_recent_step, most_recent_path = path_steps[-1]
+    
+    for step, path in path_steps:
+        # Always keep checkpoints that are multiples of save_freq
+        if step % save_freq == 0:
+            paths_to_keep.append(path)
+        # Keep the most recent checkpoint (even if not a multiple of save_freq)
+        elif step == most_recent_step:
+            paths_to_keep.append(path)
+        # Delete intermediate checkpoints that are before the current save_freq multiple
+        elif step < current_save_freq_multiple:
+            paths_to_delete.append(path)
+        # Keep intermediate checkpoints that are after the current save_freq multiple
+        # (they will be deleted when we reach the next save_freq multiple)
+        else:
+            paths_to_keep.append(path)
+    
+    return paths_to_keep, paths_to_delete

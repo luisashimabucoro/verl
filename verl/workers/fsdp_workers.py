@@ -315,8 +315,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             torch_dtype = PrecisionType.to_dtype(torch_dtype)
 
         # override model kwargs
+        attn_implementation = override_model_config.get("attn_implementation", "flash_attention_2")
         actor_model_config = AutoConfig.from_pretrained(
-            local_path, trust_remote_code=trust_remote_code, attn_implementation="flash_attention_2"
+            local_path, 
+            trust_remote_code=trust_remote_code, 
+            attn_implementation=attn_implementation,
         )
         # TODO: VL models use VisionAttention, which directly uses flash_attention in transformers>=4.53
         # which will be patched by _ulysses_flash_attention_forward, but errorly misses position_ids
@@ -630,8 +633,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # For sync mode, we directly switch to trainer mode here.
         # For async mode, we can't call run_until_complete here, so we will switch to trainer mode in AgentLoopManager.
         if rollout_config.mode == "sync" and self._is_actor:
-            loop = asyncio.get_event_loop()
-            loop.run_until_complete(self.trainer_mode())
+            try:
+                loop = asyncio.get_event_loop()
+                loop.run_until_complete(self.trainer_mode())
+            except RuntimeError:
+                # If no event loop exists in the current thread (e.g., in Ray workers),
+                # create a new one and run the coroutine
+                asyncio.run(self.trainer_mode())
 
     async def rollout_mode(self):
         """Context switch hybridengine to rollout mode."""
@@ -888,6 +896,34 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         return output
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def update_loss_coefficients(
+        self,
+        entropy_coeff: Optional[float] = None,
+        kl_loss_coef: Optional[float] = None,
+    ) -> dict[str, float]:
+        """Update loss coefficients used by the actor."""
+        if not self._is_actor:
+            return {}
+
+        updates: dict[str, float] = {}
+
+        if entropy_coeff is not None:
+            self.actor.update_loss_coefficients(entropy_coeff=entropy_coeff)
+            updates["entropy_coeff"] = entropy_coeff
+        if kl_loss_coef is not None:
+            self.actor.update_loss_coefficients(kl_loss_coef=kl_loss_coef)
+            updates["kl_loss_coef"] = kl_loss_coef
+
+        if updates:
+            with open_dict(self.config.actor):
+                if "entropy_coeff" in updates:
+                    self.config.actor.entropy_coeff = updates["entropy_coeff"]
+                if "kl_loss_coef" in updates:
+                    self.config.actor.kl_loss_coef = updates["kl_loss_coef"]
+
+        return updates
+
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="rollout"))
     @DistProfiler.annotate(color="red", role="rollout_generate")
     def generate_sequences(self, prompts: DataProto):
@@ -1020,7 +1056,16 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         return output
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
+    def save_checkpoint(
+        self,
+        local_path,
+        hdfs_path=None,
+        global_step=0,
+        max_ckpt_to_keep=None,
+        force_sync_save=False,
+        save_freq=-1,
+        is_preemp_checkpoint=False,
+    ):
         from verl.utils.logger import log_with_rank
 
         # only support save and load ckpt for actor
@@ -1030,7 +1075,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
 
         self.checkpoint_manager.save_checkpoint(
-            local_path=local_path, hdfs_path=hdfs_path, global_step=global_step, max_ckpt_to_keep=max_ckpt_to_keep
+            local_path=local_path,
+            hdfs_path=hdfs_path,
+            global_step=global_step,
+            max_ckpt_to_keep=max_ckpt_to_keep,
+            force_sync_save=force_sync_save,
+            save_freq=save_freq,
+            is_preemp_checkpoint=is_preemp_checkpoint,
         )
         dist.barrier()
 
@@ -1501,14 +1552,29 @@ class CriticWorker(Worker, DistProfilerExtension):
         return output
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
+    def save_checkpoint(
+        self,
+        local_path,
+        hdfs_path=None,
+        global_step=0,
+        max_ckpt_to_keep=None,
+        force_sync_save=False,
+        save_freq=-1,
+        is_preemp_checkpoint=False,
+    ):
         import torch
 
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.critic_module)
 
         self.checkpoint_manager.save_checkpoint(
-            local_path=local_path, hdfs_path=hdfs_path, global_step=global_step, max_ckpt_to_keep=max_ckpt_to_keep
+            local_path=local_path,
+            hdfs_path=hdfs_path,
+            global_step=global_step,
+            max_ckpt_to_keep=max_ckpt_to_keep,
+            force_sync_save=force_sync_save,
+            save_freq=save_freq,
+            is_preemp_checkpoint=is_preemp_checkpoint,
         )
 
         torch.distributed.barrier()

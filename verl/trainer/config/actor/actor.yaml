@@ -20,6 +20,9 @@ ppo_micro_batch_size: null
 # Local per-GPU micro batch size
 ppo_micro_batch_size_per_gpu: null
 
+# Local per-GPU micro batch size for inference
+ppo_infer_micro_batch_size_per_gpu: null
+
 # Whether to automatically adjust batch size at runtime
 # oc.select: the default val for ref.log_prob_use_dynamic_bsz
 use_dynamic_bsz: false
@@ -28,6 +31,9 @@ use_dynamic_bsz: false
 # Typically it should be: n * ${data.max_prompt_length} + ${data.max_response_length}
 # oc.select: the default val for ref.log_prob_max_token_len_per_gpu
 ppo_max_token_len_per_gpu: 16384
+
+# Max tokens per GPU for inference
+ppo_infer_max_token_len_per_gpu: 16384
 
 # PPO clip ratio
 clip_ratio: 0.2
@@ -74,6 +80,45 @@ loss_agg_mode: token-mean
 # Entropy regularization coefficient in PPO loss
 entropy_coeff: 0
 
+# Disable entropy regularization after this global step (null keeps it enabled)
+disable_entropy_after_step: null
+
+# Whether to anneal entropy coefficient using cosine decay (false keeps it constant)
+anneal_entropy_coeff: false
+
+# Entropy coefficient schedule type. Options: "cosine", "constant", or null/false
+entropy_coeff_schedule: null
+
+# Warmup learning rate for entropy annealing (starting value for cosine decay)
+entropy_anneal_warmup_learning_rate: 0.0
+
+# Number of warmup steps for entropy annealing
+entropy_anneal_warmup_steps: 0
+
+# Number of steps to hold base entropy coefficient before starting decay
+entropy_anneal_hold_base_rate_steps: 10
+
+# Number of steps before total_steps where decay reaches end_learning_rate
+entropy_anneal_early_stop: 0
+
+# Minimum entropy coefficient value at the end of decay
+entropy_anneal_end_learning_rate: 0.0
+
+# Lower entropy threshold for constant decay schedule
+constant_decay_lower_boundary: null
+
+# Upper entropy threshold for constant decay schedule
+constant_decay_upper_boundary: null
+
+# Entropy coefficient when boundaries are exceeded in constant decay
+constant_decay_constant_value: 0.0
+
+# Default entropy coefficient when within boundaries in constant decay
+constant_decay_default_value: 0.0
+
+# Sync clip_ratio_high to clip_ratio after this global step (null leaves it unchanged)
+change_clip_high_after_step: null
+
 # Whether to use KL loss instead of KL reward penalty. True for GRPO
 use_kl_loss: false
 
@@ -83,6 +128,9 @@ use_torch_compile: true
 
 # KL loss coefficient when use_kl_loss is enabled. For GRPO
 kl_loss_coef: 0.001
+
+# Disable KL loss after this global step (null keeps it enabled)
+disable_kl_after_step: null
 
 # Type of KL divergence loss. Options: "kl"(k1), "abs", "mse"(k2), "low_var_kl"(k3), "full"
 kl_loss_type: low_var_kl
@@ -110,6 +158,16 @@ checkpoint:
   # Whether to save checkpoints asynchronously. Only effective for Megatron as of now.
   async_save: False
 
+  # Mode for async checkpointing. Options: "shm" (uses /dev/shm) or null (sync).
+  # Only implemented for FSDP as of now.
+  async_save_mode: null
+
+  # Whether to clean up old checkpoints asynchronously
+  async_cleanup: False
+
+  # Enables debug print statements within save/cleanup threads
+  thread_debug: True
+
 # optimizer configs
 optim:
 
@@ -131,6 +189,18 @@ optim:
 
 # Whether to use custom fused kernels (e.g., FlashAttention, fused MLP)
 use_fused_kernels: ${oc.select:actor_rollout_ref.model.use_fused_kernels,false}
+
+# Engine configuration
+engine: {}
+
+# Seed for data loader
+data_loader_seed: 1
+
+# Number of rollouts per sample (must be overridden by sampling config)
+rollout_n: 1
+
+# Model configuration
+model_config: {}
 
 # profile the actor model in `update_policy` 
 profiler:

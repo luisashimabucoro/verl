@@ -72,9 +72,34 @@ class ActorConfig(BaseConfig):
         clip_ratio_c (float): Clipping ratio for critic loss.
         loss_agg_mode (str): Loss aggregation mode. Options: 'token-mean', 'sample-mean'.
         entropy_coeff (float): Entropy coefficient for regularization.
+        disable_entropy_after_step (Optional[int]): Global step after which entropy regularization is disabled.
+            If None, the entropy coefficient remains active throughout training.
+        anneal_entropy_coeff (bool): Whether to anneal entropy coefficient using cosine decay.
+            If True, the entropy coefficient will decay from base_entropy_coeff to 0 over training.
+        entropy_coeff_schedule (Optional[str]): Entropy coefficient schedule type. Options: "cosine", "constant", or None/False.
+            If None/False, no schedule is applied. If "cosine", uses cosine decay. If "constant", uses constant decay based on entropy boundaries.
+        entropy_anneal_warmup_learning_rate (float): Warmup learning rate for entropy annealing
+            (starting value for cosine decay). Defaults to 0.0.
+        entropy_anneal_warmup_steps (int): Number of warmup steps for entropy annealing. Defaults to 0.
+        entropy_anneal_hold_base_rate_steps (int): Number of steps to hold base entropy coefficient
+            before starting decay. Defaults to 10.
+        entropy_anneal_early_stop (int): Number of steps before total_steps where decay reaches end_learning_rate.
+            Defaults to 0.
+        entropy_anneal_end_learning_rate (float): Minimum entropy coefficient value at the end of decay.
+            Defaults to 0.0.
+        constant_decay_lower_boundary (Optional[float]): Lower entropy threshold for constant decay schedule.
+            Required if entropy_coeff_schedule is "constant".
+        constant_decay_upper_boundary (Optional[float]): Upper entropy threshold for constant decay schedule.
+            Required if entropy_coeff_schedule is "constant".
+        constant_decay_constant_value (float): Entropy coefficient when boundaries are exceeded in constant decay.
+            Defaults to 0.0.
+        constant_decay_default_value (float): Default entropy coefficient when within boundaries in constant decay.
+            Defaults to 0.0.
         use_kl_loss (bool): Whether to use KL divergence loss.
         use_torch_compile (bool): Whether to use torch.compile for optimization.
         kl_loss_coef (float): KL divergence loss coefficient.
+        disable_kl_after_step (Optional[int]): Global step after which KL loss is disabled. If None, the KL
+            coefficient remains unchanged.
         kl_loss_type (str): Type of KL loss to use.
         ppo_epochs (int): Number of PPO epochs per training step.
         shuffle (bool): Whether to shuffle data during training.
@@ -88,6 +113,9 @@ class ActorConfig(BaseConfig):
         "ppo_micro_batch_size",
         "ppo_micro_batch_size_per_gpu",
         "ppo_infer_micro_batch_size_per_gpu",
+        "entropy_coeff",
+        "kl_loss_coef",
+        "clip_ratio_high",
     }
 
     strategy: str = MISSING
@@ -106,9 +134,23 @@ class ActorConfig(BaseConfig):
     clip_ratio_c: float = 3.0
     loss_agg_mode: str = "token-mean"
     entropy_coeff: float = 0
+    disable_entropy_after_step: Optional[int] = None
+    anneal_entropy_coeff: bool = False
+    entropy_coeff_schedule: Optional[str] = None  # "cosine", "constant", or None/False
+    entropy_anneal_warmup_learning_rate: float = 0.0
+    entropy_anneal_warmup_steps: int = 0
+    entropy_anneal_hold_base_rate_steps: int = 10
+    entropy_anneal_early_stop: int = 0
+    entropy_anneal_end_learning_rate: float = 0.0
+    constant_decay_lower_boundary: Optional[float] = None
+    constant_decay_upper_boundary: Optional[float] = None
+    constant_decay_constant_value: float = 0.0
+    constant_decay_default_value: float = 0.0
+    change_clip_high_after_step: Optional[int] = None
     use_kl_loss: bool = False
     use_torch_compile: bool = True
     kl_loss_coef: float = 0.001
+    disable_kl_after_step: Optional[int] = None
     kl_loss_type: str = "low_var_kl"
     ppo_epochs: int = 1
     shuffle: bool = False
@@ -117,7 +159,7 @@ class ActorConfig(BaseConfig):
     use_fused_kernels: bool = False
     profiler: ProfilerConfig = field(default_factory=ProfilerConfig)
     engine: BaseConfig = field(default_factory=BaseConfig)
-    data_loader_seed = 1
+    data_loader_seed: int = 1
     rollout_n: int = 1  # must be override by sampling config
     model_config: HFModelConfig = field(default_factory=BaseConfig)
 

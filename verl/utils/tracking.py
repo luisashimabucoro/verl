@@ -66,7 +66,13 @@ class Tracking:
             settings = None
             if config and config["trainer"].get("wandb_proxy", None):
                 settings = wandb.Settings(https_proxy=config["trainer"]["wandb_proxy"])
-            wandb.init(project=project_name, name=experiment_name, config=config, settings=settings)
+            
+            # Get wandb_group from config if available, otherwise use None (no grouping)
+            wandb_group = None
+            if config and config.get("trainer") and config["trainer"].get("wandb_group") is not None:
+                wandb_group = config["trainer"]["wandb_group"]
+            
+            wandb.init(project=project_name, name=experiment_name, group=wandb_group, config=config, settings=settings)
             self.logger["wandb"] = wandb
 
         if "trackio" in default_backend:

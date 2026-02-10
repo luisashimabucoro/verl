@@ -48,6 +48,9 @@ actor_rollout_ref:
 
     # for huge model, layered summon can save memory (prevent OOM) but make it slower
     layered_summon: False
+  model:
+    override_config:
+      attn_implementation: sdpa
 
 # custom reward function definition
 custom_reward_function:
@@ -148,10 +151,19 @@ trainer:
   total_training_steps: null
 
   # Project name for experiment tracking (e.g., wandb)
+  # Can be overridden from external configs via Hydra: trainer.project_name=<value>
   project_name: verl_examples
 
-  # Experiment name for run identification in tracking tools
+  # Experiment name for run identification in tracking tools (e.g., wandb)
+  # This is the unique run name. Can be overridden from external configs
+  # via Hydra: trainer.experiment_name=<value>
   experiment_name: gsm8k
+
+  # Wandb group name for grouping related runs together (e.g., for comparing runs)
+  # If null, wandb will not use grouping. Can be overridden from external configs
+  # via Hydra: trainer.wandb_group=<value>
+  # This is typically set to the base experiment name without job IDs for easier grouping
+  wandb_group: null
 
   # Logging backends to use: "console", "wandb", etc.
   logger: ["console", "wandb"]
@@ -173,6 +185,24 @@ trainer:
 
   # Save frequency (by iteration) for model checkpoints
   save_freq: -1
+
+  # Preemptive save frequency (by iteration) for frequent checkpointing to handle preemptive runs.
+  # If set to a positive value, checkpoints will be saved every preemp_save_freq steps.
+  # However, only checkpoints at multiples of save_freq will be kept long-term.
+  # Intermediate checkpoints between save_freq multiples will be deleted when a new save_freq multiple is reached.
+  # For example, with preemp_save_freq=2 and save_freq=20:
+  # - Checkpoints saved at steps 2, 4, 6, ..., 20, 22, 24, ..., 40, ...
+  # - When step 20 is reached, checkpoints 2-18 are deleted, keeping 20
+  # - When step 22 is saved, it's kept temporarily
+  # - When step 40 is reached, checkpoints 22-38 are deleted, keeping 40
+  # Set to -1 or 0 to disable preemptive checkpointing (only save at save_freq multiples).
+  preemp_save_freq: -1
+
+  # Time-based checkpoint saving interval (in seconds). If set to a positive value, checkpoints will be saved
+  # periodically based on elapsed time since the last checkpoint, regardless of save_freq.
+  # For example, set to 14400 (4 hours) to save a checkpoint every 4 hours.
+  # Set to -1 or 0 to disable time-based checkpointing.
+  save_time_interval: -1
 
   # ESI refers to the elastic server instance used during training, similar to the training plan. For example,
   # if you purchase 10 hours of computing power, the ESI will automatically shut down after 10 hours of training.
@@ -226,6 +256,9 @@ trainer:
   # whether to use legacy worker implementation
   #  mode: "auto", "enable", or "disable"
   use_legacy_worker_impl: auto
+
+  # Whether to log training samples statistics during training
+  log_training_behavior: False
 
 # profiler configs
 global_profiler:

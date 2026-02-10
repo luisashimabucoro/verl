@@ -654,6 +654,32 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         aggressive_empty_cache(force_sync=True)
         return output
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def update_loss_coefficients(
+        self,
+        entropy_coeff: Optional[float] = None,
+        kl_loss_coef: Optional[float] = None,
+    ) -> dict[str, float]:
+        if not self._is_actor:
+            return {}
+
+        updates: dict[str, float] = {}
+        if entropy_coeff is not None:
+            self.actor.update_loss_coefficients(entropy_coeff=entropy_coeff)
+            updates["entropy_coeff"] = entropy_coeff
+        if kl_loss_coef is not None:
+            self.actor.update_loss_coefficients(kl_loss_coef=kl_loss_coef)
+            updates["kl_loss_coef"] = kl_loss_coef
+
+        if updates:
+            with open_dict(self.config.actor):
+                if "entropy_coeff" in updates:
+                    self.config.actor.entropy_coeff = updates["entropy_coeff"]
+                if "kl_loss_coef" in updates:
+                    self.config.actor.kl_loss_coef = updates["kl_loss_coef"]
+
+        return updates
+
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="rollout"))
     @GPUMemoryLogger(role="generate_sequences", logger=logger)
     @DistProfiler.annotate(color="red")
@@ -773,11 +799,26 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         pass
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def save_checkpoint(self, checkpoint_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
+    def save_checkpoint(
+        self,
+        checkpoint_path,
+        hdfs_path=None,
+        global_step=0,
+        max_ckpt_to_keep=None,
+        force_sync_save=False,
+        save_freq=-1,
+        is_preemp_checkpoint=False,
+    ):
         if self._is_offload_param:
             load_megatron_model_to_gpu(self.actor_module)
         self.checkpoint_mananager.save_checkpoint(
-            local_path=checkpoint_path, hdfs_path=hdfs_path, global_step=global_step, max_ckpt_to_keep=max_ckpt_to_keep
+            local_path=checkpoint_path,
+            hdfs_path=hdfs_path,
+            global_step=global_step,
+            max_ckpt_to_keep=max_ckpt_to_keep,
+            force_sync_save=force_sync_save,
+            save_freq=save_freq,
+            is_preemp_checkpoint=is_preemp_checkpoint,
         )
         torch.distributed.barrier()
         if self._is_offload_param:
@@ -1085,11 +1126,26 @@ class CriticWorker(MegatronWorker, DistProfilerExtension):
             offload_megatron_optimizer(self.critic_optimizer)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def save_checkpoint(self, checkpoint_path, hdfs_path=None, global_steps=0, max_ckpt_to_keep=None):
+    def save_checkpoint(
+        self,
+        checkpoint_path,
+        hdfs_path=None,
+        global_steps=0,
+        max_ckpt_to_keep=None,
+        force_sync_save=False,
+        save_freq=-1,
+        is_preemp_checkpoint=False,
+    ):
         if self._is_offload_param:
             load_megatron_model_to_gpu(self.critic_module)
         self.checkpoint_mananager.save_checkpoint(
-            local_path=checkpoint_path, hdfs_path=hdfs_path, global_step=global_steps, max_ckpt_to_keep=max_ckpt_to_keep
+            local_path=checkpoint_path,
+            hdfs_path=hdfs_path,
+            global_step=global_steps,
+            max_ckpt_to_keep=max_ckpt_to_keep,
+            force_sync_save=force_sync_save,
+            save_freq=save_freq,
+            is_preemp_checkpoint=is_preemp_checkpoint,
         )
         if self._is_offload_param:
             offload_megatron_model_to_cpu(self.critic_module)

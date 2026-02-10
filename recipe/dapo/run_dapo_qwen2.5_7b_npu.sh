@@ -32,15 +32,15 @@ train_prompt_mini_bsz=1
 # Ray
 PWD=./
 RAY_ADDRESS=${RAY_ADDRESS:-"http://localhost:8265"}
-WORKING_DIR=${WORKING_DIR:-"${PWD}"}
+WORKING_DIR=${WORKING_DIR:-"${HOME}/code/libs/verl"}
 RUNTIME_ENV=${RUNTIME_ENV:-"${WORKING_DIR}/verl/trainer/runtime_env.yaml"}
 
 # Paths
-RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}/verl"}
-MODEL_PATH=${MODEL_PATH:-"${RAY_DATA_HOME}/models/Qwen2.5-7B-Instruct"}
-CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/ckpts/${project_name}/${exp_name}"}
-TRAIN_FILE=${TRAIN_FILE:-"${RAY_DATA_HOME}/data/dapo-math-17k.parquet"}
-TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/data/aime-2024.parquet"}
+RAY_DATA_HOME=${RAY_DATA_HOME:-"${WORKING_DIR}/verl"}
+MODEL_PATH=${MODEL_PATH:-"${STORAGE_DIR}/models/Qwen2.5-7B-Instruct"}
+CKPTS_DIR=${CKPTS_DIR:-"${STORAGE_DIR}/checkpoints/${project_name}/${exp_name}"}
+TRAIN_FILE=${TRAIN_FILE:-"${STORAGE_DIR}/data/dapo-math-17k.parquet"}
+TEST_FILE=${TEST_FILE:-"${STORAGE_DIR}/data/aime-2024.parquet"}
 
 # Algorithm
 temperature=1.0
